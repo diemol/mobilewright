@@ -2,7 +2,7 @@ import sharp from 'sharp';
 import type { MobilewrightDriver, ViewNode, Bounds, SwipeDirection, ScreenSize } from '@mobilewright/protocol';
 import { queryAll, type LocatorStrategy } from './query-engine.js';
 import { sleep } from './sleep.js';
-import { captureLocation, type StepLocation } from './stackTrace.js';
+import { runStep, type StepLocation } from './stackTrace.js';
 
 export type StepFn = (title: string, fn: () => Promise<unknown>, location: StepLocation | undefined) => Promise<unknown>;
 
@@ -34,21 +34,17 @@ export class Locator {
   _stepFn: StepFn | null = null;
 
   constructor(
-    private readonly driver: MobilewrightDriver,
-    private readonly strategy: LocatorStrategy,
-    private readonly options: LocatorOptions = {},
+    protected readonly driver: MobilewrightDriver,
+    protected readonly strategy: LocatorStrategy,
+    protected readonly options: LocatorOptions = {},
   ) {}
 
   get expectTimeout(): number | undefined {
     return this.options.expectTimeout;
   }
 
-  private async _step<T>(title: string, fn: () => Promise<T>): Promise<T> {
-    if (this._stepFn) {
-      const location = captureLocation();
-      return this._stepFn(title, fn as () => Promise<unknown>, location) as Promise<T>;
-    }
-    return fn();
+  protected async _step<T>(title: string, fn: () => Promise<T>): Promise<T> {
+    return runStep(this._stepFn, title, fn);
   }
 
   // ─── Chaining ────────────────────────────────────────────────
@@ -77,7 +73,7 @@ export class Locator {
     return this.child({ kind: 'placeholder', value: placeholder, exact: opts?.exact });
   }
 
-  private child(childStrategy: LocatorStrategy): Locator {
+  protected child(childStrategy: LocatorStrategy): Locator {
     const loc = new Locator(
       this.driver,
       { kind: 'chain', parent: this.strategy, child: childStrategy },

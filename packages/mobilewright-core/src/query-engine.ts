@@ -8,6 +8,7 @@ export type LocatorStrategy =
   | { kind: 'type'; value: string }
   | { kind: 'role'; value: string; name?: string | RegExp }
   | { kind: 'placeholder'; value: string; exact?: boolean }
+  | { kind: 'webview'; testId?: string }
   | { kind: 'chain'; parent: LocatorStrategy; child: LocatorStrategy }
   | { kind: 'nth'; parent: LocatorStrategy; index: number };
 
@@ -68,6 +69,14 @@ function walkTree(
   }
 }
 
+export const WEBVIEW_TYPES = new Set([
+  'WKWebView',
+  'XCUIElementTypeWebView',
+  'android.webkit.WebView',
+  'RCTWebView',
+  'RNCWebView',
+]);
+
 function matchesStrategy(
   node: ViewNode,
   strategy: LocatorStrategy,
@@ -118,6 +127,15 @@ function matchesStrategy(
       return strategy.exact === false
         ? node.placeholder.toLowerCase().includes(strategy.value.toLowerCase())
         : node.placeholder === strategy.value;
+
+    case 'webview':
+      if (!WEBVIEW_TYPES.has(node.type)) {
+        return false;
+      }
+      if (strategy.testId !== undefined) {
+        return node.identifier === strategy.testId || node.resourceId === strategy.testId;
+      }
+      return true;
 
     case 'chain':
       // Handled above in queryAll

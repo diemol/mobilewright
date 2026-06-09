@@ -1,7 +1,10 @@
-import type { Locator } from './locator.js';
+import type { Locator, StepFn } from './locator.js';
 import { LocatorError } from './locator.js';
+import { Page } from './page.js';
+import { WebLocator } from './web-locator.js';
 import { retryUntil } from './poll.js';
-import { filterStack, captureLocation } from './stackTrace.js';
+import { filterStack, runStep } from './stackTrace.js';
+import { textValue, type FrameExpectParams } from './web-expect-matcher.js';
 
 const DEFAULT_TIMEOUT = 5_000;
 
@@ -10,27 +13,72 @@ export interface ExpectOptions {
 }
 
 /**
- * Playwright-style expect for mobile locators and plain values.
+ * Playwright-style expect for mobile locators, web locators, pages, and plain values.
  *
  * Usage:
  *   expect(locator).toBeVisible()
- *   expect(locator).not.toBeVisible()
- *   expect(locator).toHaveText('Hello')
+ *   expect(page).toHaveURL(/dashboard/)
+ *   expect(webLocator).toHaveText('Hello')
  *   expect(42).toBe(42)
  */
+export function expect(actual: Page): PageAssertions;
+export function expect(actual: WebLocator): WebLocatorAssertions;
 export function expect(actual: Locator): LocatorAssertions;
 export function expect<T>(actual: T): ValueAssertions<T>;
 export function expect(actual: unknown): any {
+  if (actual instanceof Page) { return new PageAssertions(actual, false); }
+  if (actual instanceof WebLocator) { return new WebLocatorAssertions(actual, false); }
   if (actual && typeof actual === 'object' && 'tap' in actual && 'getText' in actual) {
     return new LocatorAssertions(actual as Locator, false);
   }
   return new ValueAssertions(actual, false);
 }
 
+// Minimal interface satisfied by both Locator and WebLocator (after getText/getValue aliases).
+interface LocatorLike {
+  isVisible(opts?: { timeout?: number }): Promise<boolean>;
+  isEnabled(opts?: { timeout?: number }): Promise<boolean>;
+  isChecked(opts?: { timeout?: number }): Promise<boolean>;
+  isSelected?(opts?: { timeout?: number }): Promise<boolean>;
+  isFocused?(opts?: { timeout?: number }): Promise<boolean>;
+  getText(opts?: { timeout?: number }): Promise<string>;
+  getValue(opts?: { timeout?: number }): Promise<string>;
+  count(): Promise<number>;
+  expectTimeout?: number;
+  _stepFn?: StepFn | null;
+}
+
+// Wrap an assertion body as a reporter step titled after the matcher, shared by
+// all assertion classes so the title/negation convention lives in one place.
+function wrapAssertion<T>(
+  stepFn: StepFn | null | undefined,
+  negated: boolean,
+  method: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const title = negated ? `expect.not.${method}()` : `expect.${method}()`;
+  return runStep(stepFn, title, fn);
+}
+
+// Poll until `predicate` holds (or the timeout elapses), re-raising any failure
+// as an ExpectError. The predicate must already account for negation.
+async function retryAssertion<T>(
+  poll: () => Promise<T>,
+  predicate: (value: T) => boolean,
+  timeout: number,
+  failMessage: string | (() => string),
+): Promise<void> {
+  try {
+    await retryUntil(poll, predicate, timeout, failMessage);
+  } catch (e) {
+    throw new ExpectError(e instanceof Error ? e.message : String(e));
+  }
+}
+
 class LocatorAssertions {
   constructor(
-    private readonly locator: Locator,
-    private readonly negated: boolean,
+    protected readonly locator: LocatorLike,
+    protected readonly negated: boolean,
   ) {}
 
   get not(): LocatorAssertions {
@@ -41,14 +89,8 @@ class LocatorAssertions {
     return opts?.timeout ?? this.locator.expectTimeout ?? DEFAULT_TIMEOUT;
   }
 
-  private _wrapAssertion<T>(method: string, fn: () => Promise<T>): Promise<T> {
-    const stepFn = this.locator._stepFn;
-    const title = this.negated ? `expect.not.${method}()` : `expect.${method}()`;
-    if (stepFn) {
-      const location = captureLocation();
-      return stepFn(title, fn as () => Promise<unknown>, location) as Promise<T>;
-    }
-    return fn();
+  protected _wrapAssertion<T>(method: string, fn: () => Promise<T>): Promise<T> {
+    return wrapAssertion(this.locator._stepFn, this.negated, method, fn);
   }
 
   async toBeVisible(opts?: ExpectOptions): Promise<void> {
@@ -83,13 +125,21 @@ class LocatorAssertions {
 
   async toBeSelected(opts?: ExpectOptions): Promise<void> {
     return this._wrapAssertion('toBeSelected', async () => {
-      await this.assertBoolean('selected', () => this.locator.isSelected({ timeout: 0 }), opts);
+      const isSelected = this.locator.isSelected?.bind(this.locator);
+      if (!isSelected) {
+        throw new ExpectError('toBeSelected() is not supported for this locator');
+      }
+      await this.assertBoolean('selected', () => isSelected({ timeout: 0 }), opts);
     });
   }
 
   async toBeFocused(opts?: ExpectOptions): Promise<void> {
     return this._wrapAssertion('toBeFocused', async () => {
-      await this.assertBoolean('focused', () => this.locator.isFocused({ timeout: 0 }), opts);
+      const isFocused = this.locator.isFocused?.bind(this.locator);
+      if (!isFocused) {
+        throw new ExpectError('toBeFocused() is not supported for this locator');
+      }
+      await this.assertBoolean('focused', () => isFocused({ timeout: 0 }), opts);
     });
   }
 
@@ -194,7 +244,7 @@ class LocatorAssertions {
     });
   }
 
-  private async assertBoolean(
+  protected async assertBoolean(
     name: string,
     poll: () => Promise<boolean>,
     opts?: ExpectOptions,
@@ -209,7 +259,7 @@ class LocatorAssertions {
     );
   }
 
-  private async assertText(
+  protected async assertText(
     predicate: (text: string) => boolean,
     expected: string | RegExp,
     opts?: ExpectOptions,
@@ -241,17 +291,13 @@ class LocatorAssertions {
     );
   }
 
-  private async retryAssertion<T>(
+  protected retryAssertion<T>(
     poll: () => Promise<T>,
     predicate: (value: T) => boolean,
     timeout: number,
     failMessage: string | (() => string),
   ): Promise<void> {
-    try {
-      await retryUntil(poll, predicate, timeout, failMessage);
-    } catch (e) {
-      throw new ExpectError(e instanceof Error ? e.message : String(e));
-    }
+    return retryAssertion(poll, predicate, timeout, failMessage);
   }
 }
 
@@ -398,6 +444,181 @@ class ValueAssertions<T> {
     if (!ok) {
       throw new ExpectError(this.negated ? `Negation failed: ${message}` : message);
     }
+  }
+}
+
+// ─── PageAssertions ───────────────────────────────────────────
+
+class PageAssertions {
+  constructor(
+    private readonly page: Page,
+    private readonly negated: boolean,
+  ) {}
+
+  get not(): PageAssertions {
+    return new PageAssertions(this.page, !this.negated);
+  }
+
+  private _wrapAssertion<T>(method: string, fn: () => Promise<T>): Promise<T> {
+    return wrapAssertion(this.page._stepFn, this.negated, method, fn);
+  }
+
+  // Applies negation so callers pass the plain "does it match?" predicate.
+  private matches(pass: boolean): boolean {
+    return this.negated ? !pass : pass;
+  }
+
+  async toHaveURL(url: string | RegExp, opts?: ExpectOptions): Promise<void> {
+    return this._wrapAssertion('toHaveURL', async () => {
+      let last = '';
+      await retryAssertion(
+        async () => { try { last = await this.page.url(); } catch { last = ''; } return last; },
+        (current) => this.matches(url instanceof RegExp ? url.test(current) : current === url),
+        opts?.timeout ?? DEFAULT_TIMEOUT,
+        () => `Expected page URL to ${this.negated ? 'not ' : ''}match "${url}", but got "${last}"`,
+      );
+    });
+  }
+
+  async toHaveTitle(title: string | RegExp, opts?: ExpectOptions): Promise<void> {
+    return this._wrapAssertion('toHaveTitle', async () => {
+      let last = '';
+      await retryAssertion(
+        async () => { try { last = await this.page.title(); } catch { last = ''; } return last; },
+        (current) => this.matches(title instanceof RegExp ? title.test(current) : current === title),
+        opts?.timeout ?? DEFAULT_TIMEOUT,
+        () => `Expected page title to ${this.negated ? 'not ' : ''}match "${title}", but got "${last}"`,
+      );
+    });
+  }
+}
+
+// ─── WebLocatorAssertions ─────────────────────────────────────
+// Standalone: every web matcher routes through Playwright's injected expect()
+// (window.__mwInjected.expect) for byte-exact matcher semantics. Native
+// LocatorAssertions and PageAssertions are unaffected.
+
+class WebLocatorAssertions {
+  constructor(
+    private readonly webLocator: WebLocator,
+    private readonly negated: boolean,
+  ) {}
+
+  get not(): WebLocatorAssertions {
+    return new WebLocatorAssertions(this.webLocator, !this.negated);
+  }
+
+  private assertionTimeout(opts?: ExpectOptions): number {
+    return opts?.timeout ?? this.webLocator.expectTimeout ?? DEFAULT_TIMEOUT;
+  }
+
+  // Poll the injected matcher until matches !== isNot, or throw ExpectError.
+  private runMatcher(
+    method: string,
+    params: Omit<FrameExpectParams, 'isNot' | 'timeout'>,
+    opts?: ExpectOptions,
+  ): Promise<void> {
+    return wrapAssertion(this.webLocator._stepFn, this.negated, method, async () => {
+      const isNot = this.negated;
+      let received: unknown;
+      let missingReceived = false;
+      await retryAssertion(
+        async () => {
+          const result = await this.webLocator._runInjectedExpect({ ...params, isNot, timeout: 0 });
+          received = result.received;
+          missingReceived = result.missingReceived ?? false;
+          return result.matches;
+        },
+        (matches) => matches !== isNot,
+        this.assertionTimeout(opts),
+        () => {
+          const got = missingReceived ? 'no element' : fmt(received);
+          return isNot
+            ? `Expected ${method} NOT to match, but it did (received ${got})`
+            : `Expected ${method} to match, but it did not (received ${got})`;
+        },
+      );
+    });
+  }
+
+  toBeVisible(opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toBeVisible', { expression: 'to.be.visible' }, opts);
+  }
+
+  toBeHidden(opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toBeHidden', { expression: 'to.be.hidden' }, opts);
+  }
+
+  toBeEnabled(opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toBeEnabled', { expression: 'to.be.enabled' }, opts);
+  }
+
+  toBeDisabled(opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toBeDisabled', { expression: 'to.be.disabled' }, opts);
+  }
+
+  toBeEditable(opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toBeEditable', { expression: 'to.be.editable' }, opts);
+  }
+
+  toBeFocused(opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toBeFocused', { expression: 'to.be.focused' }, opts);
+  }
+
+  toBeAttached(opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toBeAttached', { expression: 'to.be.attached' }, opts);
+  }
+
+  toBeInViewport(opts?: ExpectOptions & { ratio?: number }): Promise<void> {
+    return this.runMatcher('toBeInViewport', { expression: 'to.be.in.viewport', expectedNumber: opts?.ratio }, opts);
+  }
+
+  toBeChecked(opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toBeChecked', { expression: 'to.be.checked', expectedValue: { checked: true, indeterminate: false } }, opts);
+  }
+
+  toBeEmpty(opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toBeEmpty', { expression: 'to.be.empty' }, opts);
+  }
+
+  toHaveText(expected: string | RegExp, opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toHaveText', { expression: 'to.have.text', expectedText: [textValue(expected, { normalizeWhiteSpace: true })] }, opts);
+  }
+
+  toContainText(expected: string | RegExp, opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toContainText', { expression: 'to.have.text', expectedText: [textValue(expected, { normalizeWhiteSpace: true, matchSubstring: true })] }, opts);
+  }
+
+  toHaveValue(expected: string | RegExp, opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toHaveValue', { expression: 'to.have.value', expectedText: [textValue(expected)] }, opts);
+  }
+
+  toHaveCount(expected: number, opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toHaveCount', { expression: 'to.have.count', expectedNumber: expected }, opts);
+  }
+
+  toHaveAttribute(name: string, expected: string | RegExp, opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toHaveAttribute', { expression: 'to.have.attribute.value', expressionArg: name, expectedText: [textValue(expected)] }, opts);
+  }
+
+  toHaveClass(expected: string | RegExp, opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toHaveClass', { expression: 'to.have.class', expectedText: [textValue(expected)] }, opts);
+  }
+
+  toContainClass(expected: string | RegExp, opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toContainClass', { expression: 'to.contain.class', expectedText: [textValue(expected)] }, opts);
+  }
+
+  toHaveCSS(name: string, expected: string | RegExp, opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toHaveCSS', { expression: 'to.have.css', expressionArg: name, expectedText: [textValue(expected)] }, opts);
+  }
+
+  toHaveId(expected: string | RegExp, opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toHaveId', { expression: 'to.have.id', expectedText: [textValue(expected)] }, opts);
+  }
+
+  toHaveJSProperty(name: string, expected: unknown, opts?: ExpectOptions): Promise<void> {
+    return this.runMatcher('toHaveJSProperty', { expression: 'to.have.property', expressionArg: name, expectedValue: expected }, opts);
   }
 }
 
