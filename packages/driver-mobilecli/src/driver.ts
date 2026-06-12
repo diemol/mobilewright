@@ -467,6 +467,7 @@ export class MobilecliDriver implements MobilewrightDriver {
     await this.call('device.apps.launch', {
       bundleId,
       ...(opts?.locales && { locales: opts.locales }),
+      ...(opts?.activity && { activity: opts.activity }),
     });
     debug('launched %s', bundleId);
   }

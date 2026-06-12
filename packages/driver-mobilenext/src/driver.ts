@@ -458,6 +458,7 @@ export class MobileNextDriver implements MobilewrightDriver {
     await this.call('device.apps.launch', {
       bundleId,
       ...(opts?.locales && { locales: opts.locales }),
+      ...(opts?.activity && { activity: opts.activity }),
     });
   }
 
