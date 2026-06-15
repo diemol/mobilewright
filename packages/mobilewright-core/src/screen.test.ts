@@ -32,6 +32,8 @@ function createMockDriver(): MobilewrightDriver & { _tracker: CallTracker } {
     doubleTap: async (...args: any[]) => { tracker.doubleTapCalls.push(args); },
     longPress: async (...args: any[]) => { tracker.longPressCalls.push(args); },
     typeText: async () => {},
+    pressKeys: async () => {},
+    clearText: async () => {},
     swipe: async () => {},
     gesture: async (...args: any[]) => { tracker.gestureCalls.push(args); },
     pressButton: async () => {},

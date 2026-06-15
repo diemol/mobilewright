@@ -156,9 +156,7 @@ export class Locator {
 
   async tap(opts?: { timeout?: number }): Promise<void> {
     return this._step('locator.tap()', async () => {
-      const node = await this.resolveActionable(opts?.timeout);
-      const { x, y } = centerOf(node.bounds);
-      await this.driver.tap(x, y);
+      await this._resolveAndTap(opts?.timeout);
     });
   }
 
@@ -178,13 +176,42 @@ export class Locator {
     });
   }
 
+  async clear(opts?: { timeout?: number }): Promise<void> {
+    return this._step('locator.clear()', () => this._tapAndClear(opts?.timeout));
+  }
+
   async fill(text: string, opts?: { timeout?: number }): Promise<void> {
     return this._step(`locator.fill(${JSON.stringify(text)})`, async () => {
-      const node = await this.resolveActionable(opts?.timeout);
-      const { x, y } = centerOf(node.bounds);
-      await this.driver.tap(x, y);
+      await this._tapAndClear(opts?.timeout);
       await this.driver.typeText(text);
     });
+  }
+
+  /** Resolve the element, tap its center to focus/activate it, and return the node. */
+  private async _resolveAndTap(timeout?: number): Promise<ViewNode> {
+    const node = await this.resolveActionable(timeout);
+    const { x, y } = centerOf(node.bounds);
+    await this.driver.tap(x, y);
+    return node;
+  }
+
+  /** Focus the element by tapping it, then clear its contents. */
+  private async _tapAndClear(timeout?: number): Promise<void> {
+    await this._resolveAndTap(timeout);
+    await this.driver.clearText();
+
+    // Verify the clear actually emptied the field; if the driver's select-all
+    // didn't take, only a single character is removed and we'd otherwise
+    // silently leave residual text for fill() to append to.
+    if ((await this._currentValue()) !== '') {
+      throw new LocatorError('Failed to clear element', this.strategy);
+    }
+  }
+
+  /** Read the element's current value from the latest hierarchy, '' if absent. */
+  private async _currentValue(): Promise<string> {
+    const roots = await this.driver.getViewHierarchy();
+    return queryAll(roots, this.strategy)[0]?.value ?? '';
   }
 
   async screenshot(opts?: { timeout?: number }): Promise<Buffer> {

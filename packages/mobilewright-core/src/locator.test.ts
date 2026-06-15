@@ -26,6 +26,8 @@ type CallTracker = {
   doubleTapCalls: any[][];
   longPressCalls: any[][];
   typeTextCalls: any[][];
+  pressKeysCalls: any[][];
+  clearTextCalls: any[][];
   swipeCalls: any[][];
   gestureCalls: any[][];
   pressButtonCalls: any[][];
@@ -44,6 +46,8 @@ function createMockDriver(hierarchy: ViewNode[]): MobilewrightDriver & { _tracke
     doubleTapCalls: [],
     longPressCalls: [],
     typeTextCalls: [],
+    pressKeysCalls: [],
+    clearTextCalls: [],
     swipeCalls: [],
     gestureCalls: [],
     pressButtonCalls: [],
@@ -65,6 +69,8 @@ function createMockDriver(hierarchy: ViewNode[]): MobilewrightDriver & { _tracke
     doubleTap: async (...args: any[]) => { tracker.doubleTapCalls.push(args); },
     longPress: async (...args: any[]) => { tracker.longPressCalls.push(args); },
     typeText: async (...args: any[]) => { tracker.typeTextCalls.push(args); },
+    pressKeys: async (...args: any[]) => { tracker.pressKeysCalls.push(args); },
+    clearText: async (...args: any[]) => { tracker.clearTextCalls.push(args); },
     swipe: async (...args: any[]) => { tracker.swipeCalls.push(args); },
     gesture: async (...args: any[]) => { tracker.gestureCalls.push(args); },
     pressButton: async (...args: any[]) => { tracker.pressButtonCalls.push(args); },
@@ -155,8 +161,47 @@ test.describe('Locator', () => {
     });
   });
 
+  test.describe('clear', () => {
+    test('taps to focus then asks the driver to clear the field', async () => {
+      const driver = createMockDriver(hierarchy);
+      const locator = new Locator(driver, {
+        kind: 'testId',
+        value: 'emailField',
+      });
+
+      await locator.clear();
+
+      expect(driver._tracker.tapCalls).toEqual([[195, 222]]);
+      expect(driver._tracker.clearTextCalls).toHaveLength(1);
+    });
+
+    test('throws LocatorError when element not found', async () => {
+      const driver = createMockDriver(hierarchy);
+      const locator = new Locator(driver, { kind: 'testId', value: 'missing' }, { timeout: 0 });
+
+      await expect(locator.clear()).rejects.toThrow(LocatorError);
+    });
+
+    test('throws when the field still has text after clearing', async () => {
+      // The mock clearText is a no-op, so a field that starts non-empty stays
+      // non-empty — emulating a select-all that never took effect on the device.
+      const fieldWithResidualText: ViewNode[] = [
+        node({
+          type: 'TextField',
+          identifier: 'emailField',
+          value: 'leftover',
+          bounds: { x: 20, y: 200, width: 350, height: 44 },
+        }),
+      ];
+      const driver = createMockDriver(fieldWithResidualText);
+      const locator = new Locator(driver, { kind: 'testId', value: 'emailField' });
+
+      await expect(locator.clear()).rejects.toThrow(LocatorError);
+    });
+  });
+
   test.describe('fill', () => {
-    test('taps to focus then types text', async () => {
+    test('clears the field then types text', async () => {
       const driver = createMockDriver(hierarchy);
       const locator = new Locator(driver, {
         kind: 'testId',
@@ -165,7 +210,9 @@ test.describe('Locator', () => {
 
       await locator.fill('test@example.com');
 
+      // Field is focused once by the tap, cleared, then typed into.
       expect(driver._tracker.tapCalls).toEqual([[195, 222]]);
+      expect(driver._tracker.clearTextCalls).toHaveLength(1);
       expect(driver._tracker.typeTextCalls).toEqual([['test@example.com']]);
     });
   });

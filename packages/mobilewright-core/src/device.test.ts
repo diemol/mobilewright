@@ -17,6 +17,8 @@ function createMockDriver(screenSize: ScreenSize): MobilewrightDriver {
     doubleTap: async () => {},
     longPress: async () => {},
     typeText: async () => {},
+    pressKeys: async () => {},
+    clearText: async () => {},
     swipe: async () => {},
     gesture: async () => {},
     pressButton: async () => {},

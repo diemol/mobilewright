@@ -369,6 +369,15 @@ export class MobilecliDriver implements MobilewrightDriver {
     await this.call('device.io.text', { text });
   }
 
+  async pressKeys(keys: string[]): Promise<void> {
+    await this.call('device.io.keys', { keys });
+  }
+
+  async clearText(): Promise<void> {
+    const selectAll = this.requireSession().platform === 'ios' ? 'cmd+a' : 'ctrl+a';
+    await this.pressKeys([selectAll, 'backspace']);
+  }
+
   async swipe(direction: SwipeDirection, opts?: SwipeOptions): Promise<void> {
     const screen = await this.getScreenSize();
     const centerX = screen.width / 2;
