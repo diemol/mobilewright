@@ -9,6 +9,7 @@
     { "path": "../protocol" },
     { "path": "../mobilewright-core" },
     { "path": "../driver-mobilecli" },
-    { "path": "../driver-mobilenext" }
+    { "path": "../driver-mobilenext" },
+    { "path": "../driver-saucelabs" }
   ]
 }

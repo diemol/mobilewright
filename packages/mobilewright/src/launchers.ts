@@ -2,9 +2,10 @@ import type { Platform, DeviceInfo, DeviceType, DeviceSettings, MobilewrightDriv
 import { Device } from '@mobilewright/core';
 import { MobilecliDriver, DEFAULT_URL } from '@mobilewright/driver-mobilecli';
 import { MobileNextDriver } from '@mobilewright/driver-mobilenext';
+import { SauceLabsDriver } from '@mobilewright/driver-saucelabs';
 import { ensureMobilecliReachable } from './server.js';
 import { toArray } from './config.js';
-import type { DriverConfig } from './config.js';
+import type { DriverConfig, DriverConfigSauceLabs } from './config.js';
 
 export interface LaunchOptions {
   bundleId?: string;
@@ -56,6 +57,17 @@ export function createDriver(driverConfig?: DriverConfig, url?: string): Mobilew
       region: driverConfig.region,
       apiKey: driverConfig.apiKey,
       allocationTimeout: driverConfig.allocationTimeout,
+    });
+  }
+  if (driverConfig?.type === 'saucelabs') {
+    const slConfig = driverConfig as DriverConfigSauceLabs;
+    return new SauceLabsDriver({
+      username: slConfig.username,
+      accessKey: slConfig.accessKey,
+      region: slConfig.region,
+      allocationTimeout: slConfig.allocationTimeout,
+      sessionDuration: slConfig.sessionDuration,
+      iosWdaBundleId: slConfig.iosWdaBundleId,
     });
   }
   return new MobilecliDriver({ url });
