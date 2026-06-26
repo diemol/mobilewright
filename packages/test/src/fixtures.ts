@@ -174,7 +174,7 @@ export const test = base.extend<MobilewrightTestFixtures>({
     }
   },
 
-  screen: async ({ device, video, viewTree }, use, testInfo) => {
+  screen: async ({ device, video, screenshot, viewTree }, use, testInfo) => {
     const videoMode = typeof video === 'object' ? video.mode : video;
     const shouldRecord = videoMode === 'on' || videoMode === 'retain-on-failure';
     const videoPath = shouldRecord
@@ -210,12 +210,26 @@ export const test = base.extend<MobilewrightTestFixtures>({
       }
     }
 
-    if (testInfo.status !== testInfo.expectedStatus) {
+    const screenshotMode = typeof screenshot === 'object' ? (screenshot as any).mode : screenshot;
+    const failed = testInfo.status !== testInfo.expectedStatus;
+    if (screenshotMode === 'on' || (screenshotMode === 'only-on-failure' && failed)) {
       try {
-        const screenshot = await device.screen.screenshot();
-        await testInfo.attach('screenshot-on-failure', { body: screenshot, contentType: 'image/png' });
+        const buf = await device.screen.screenshot();
+        const label = failed ? 'screenshot-on-failure' : 'screenshot';
+        await testInfo.attach(label, { body: buf, contentType: 'image/png' });
       } catch {
         // device may be disconnected
+      }
+    }
+
+    if (failed) {
+      if (screenshotMode !== 'on' && screenshotMode !== 'only-on-failure') {
+        try {
+          const buf = await device.screen.screenshot();
+          await testInfo.attach('screenshot-on-failure', { body: buf, contentType: 'image/png' });
+        } catch {
+          // device may be disconnected
+        }
       }
       if (viewTree === 'on-failure') {
         try {
