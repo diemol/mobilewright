@@ -585,7 +585,9 @@ export class SauceLabsDriver implements MobilewrightDriver {
     const rest = this.makeRest();
     const storageRef = filePathOrStorageRef.startsWith('storage:')
       ? filePathOrStorageRef
-      : await rest.uploadToStorage(filePathOrStorageRef);
+      : filePathOrStorageRef.startsWith('https://')
+        ? await rest.uploadUrlToStorage(filePathOrStorageRef)
+        : await rest.uploadToStorage(filePathOrStorageRef);
     this.lastInstalledStorageRef = storageRef;
     const result = await rest.installApp(sauceSessionId, storageRef);
     const installationId = result.installationId;

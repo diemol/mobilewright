@@ -101,7 +101,7 @@ export const test = base.extend<MobilewrightTestFixtures>({
     }
 
     for (const appPath of toArray(merged.installApps)) {
-      assertValidZipFile(appPath);
+      if (!appPath.startsWith('https://')) assertValidZipFile(appPath);
     }
 
     const client = getClient();
