@@ -325,6 +325,13 @@ export class SauceLabsDriver implements MobilewrightDriver {
       // Clean up any successfully connected sockets before propagating the error
       await ioSocket.disconnect().catch(() => {});
       await companionSocket.disconnect().catch(() => {});
+      if (ownsSession) {
+        // this.session is still unset, so disconnect() can't release the session we just
+        // created — delete it directly here instead of leaking it.
+        await rest.deleteSession(sauceSessionId).catch((deleteErr) =>
+          debug('session cleanup error after socket connect failure: %s', (deleteErr as Error).message),
+        );
+      }
       throw err;
     }
 
