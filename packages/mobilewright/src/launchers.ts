@@ -41,6 +41,8 @@ export interface ConnectDeviceParams {
   appLaunchTimeout?: number;
   installTimeout?: number;
   deviceSettings?: DeviceSettings;
+  /** Attach to an existing driver session instead of allocating a new device (Sauce Labs only). */
+  sessionId?: string;
 }
 
 export interface FindDeviceParams {
@@ -91,6 +93,7 @@ export async function connectDevice(params: ConnectDeviceParams): Promise<Device
     deviceId: params.deviceId,
     deviceType: params.deviceType,
     timeout: params.timeout,
+    sessionId: params.sessionId,
   });
 
   const settings = params.deviceSettings;

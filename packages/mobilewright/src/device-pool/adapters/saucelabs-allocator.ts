@@ -11,31 +11,32 @@ export interface SauceLabsAllocatorOptions {
 
 export class SauceLabsAllocator implements DeviceAllocator {
   private readonly driverOptions: SauceLabsDriverOptions;
-  private readonly activeDrivers = new Map<string, SauceLabsDriver>();
+  private readonly sessionsByDeviceId = new Map<string, string>();
 
   constructor(options: SauceLabsAllocatorOptions) {
     this.driverOptions = options.driverOptions;
   }
 
+  // Reserves the device via a session-only allocation so the worker that
+  // actually runs the test can attach to this same session
   async allocate(criteria: AllocationCriteria): Promise<AllocateResult> {
     debug('allocating device (criteria=%o)', criteria);
-    const driver = new SauceLabsDriver(this.driverOptions);
-    const session = await driver.connect({
-      platform: criteria.platform ?? 'android',
+    const platform = criteria.platform ?? 'android';
+    const { sessionId, deviceId } = await SauceLabsDriver.allocateSession(this.driverOptions, {
+      platform,
       deviceName: criteria.deviceNamePattern ? new RegExp(criteria.deviceNamePattern) : undefined,
-      deviceId: criteria.deviceId,
     });
-    this.activeDrivers.set(session.deviceId, driver);
-    debug('allocated device %s (platform=%s)', session.deviceId, session.platform);
-    return { deviceId: session.deviceId, platform: session.platform, driver: 'saucelabs' };
+    this.sessionsByDeviceId.set(deviceId, sessionId);
+    debug('allocated device %s (session=%s)', deviceId, sessionId);
+    return { deviceId, platform, driver: 'saucelabs', sessionId };
   }
 
   async release(deviceId: string): Promise<void> {
-    debug('releasing device %s', deviceId);
-    const driver = this.activeDrivers.get(deviceId);
-    if (driver) {
-      this.activeDrivers.delete(deviceId);
-      await driver.disconnect();
+    const sessionId = this.sessionsByDeviceId.get(deviceId);
+    if (sessionId) {
+      this.sessionsByDeviceId.delete(deviceId);
+      debug('releasing device %s (session=%s)', deviceId, sessionId);
+      await SauceLabsDriver.releaseSession(this.driverOptions, sessionId);
       debug('released device %s', deviceId);
     }
   }
