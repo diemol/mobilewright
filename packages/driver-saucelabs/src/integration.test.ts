@@ -14,12 +14,13 @@ import { SauceLabsDriver } from './driver.js';
 import type { Region } from './rest-client.js';
 
 const INTEGRATION = process.env['SAUCE_INTEGRATION'] === '1';
+const HAS_CREDENTIALS = Boolean(process.env['SAUCE_USERNAME'] && process.env['SAUCE_ACCESS_KEY']);
 const PLATFORM = (process.env['SAUCE_PLATFORM'] ?? 'ios') as Platform;
 const REGION = (process.env['SAUCE_REGION'] ?? 'us-west-1') as Region;
 const IOS_WDA_STORAGE_REF = process.env['SAUCE_IOS_WDA_STORAGE_REF'];
 
 test.describe('SauceLabsDriver integration', () => {
-  test.skip(!INTEGRATION, 'Requires SAUCE_INTEGRATION=1, SAUCE_USERNAME, and SAUCE_ACCESS_KEY');
+  test.skip(!INTEGRATION || !HAS_CREDENTIALS, 'Requires SAUCE_INTEGRATION=1, SAUCE_USERNAME, and SAUCE_ACCESS_KEY');
   test.setTimeout(120_000);
 
   test('connects and returns a session with the correct platform', async () => {

@@ -32,6 +32,9 @@ const DEFAULT_WDA_URL =
   process.env['SAUCE_IOS_WDA_URL'] ??
   'https://github.com/appium/WebDriverAgent/releases/download/v15.0.0/WebDriverAgentRunner-Runner.zip';
 
+/** Prints the Sauce Labs live-view URL to the console on session creation when set to '1'. */
+const SHOW_LIVE_VIEW = process.env['SAUCE_LIVE_VIEW'] === '1';
+
 export interface SauceLabsDriverOptions {
   /** Falls back to SAUCE_USERNAME env var when omitted. */
   username?: string;
@@ -290,6 +293,10 @@ export class SauceLabsDriver implements MobilewrightDriver {
     // waitForActiveSession() guarantees links are present before returning.
     const links = sauceSession.links!;
 
+    if (SHOW_LIVE_VIEW && links.liveViewUrl) {
+      console.log(`📱 Sauce Labs live view (${descriptor}): 🔗 ${links.liveViewUrl}`);
+    }
+
     // Fetch device descriptor for screen metrics
     let resolutionWidth = 1080;
     let resolutionHeight = 1920;
@@ -312,7 +319,14 @@ export class SauceLabsDriver implements MobilewrightDriver {
     const ioSocket = new DeviceControlSocket(links.ioWebsocketUrl, this.username, this.accessKey);
     const companionSocket = new CompanionSocket(links.eventsWebsocketUrl, this.username, this.accessKey);
 
-    await Promise.all([ioSocket.connect(), companionSocket.connect()]);
+    try {
+      await Promise.all([ioSocket.connect(), companionSocket.connect()]);
+    } catch (err) {
+      // Clean up any successfully connected sockets before propagating the error
+      await ioSocket.disconnect().catch(() => {});
+      await companionSocket.disconnect().catch(() => {});
+      throw err;
+    }
 
     let wdaStorageRef: string | undefined;
     if (platform === 'ios') {
@@ -473,10 +487,11 @@ export class SauceLabsDriver implements MobilewrightDriver {
     }
   }
 
-  /** Selects all text and deletes it using Ctrl+A and Backspace key events. */
+  /** Selects all text and deletes it using a select-all chord (Cmd+A on iOS, Ctrl+A on Android) and Backspace. */
   async clearText(): Promise<void> {
-    const { ioSocket } = this.requireSession();
-    ioSocket.sendKey('a');
+    const { ioSocket, platform } = this.requireSession();
+    const selectAll = platform === 'ios' ? 'cmd+a' : 'ctrl+a';
+    ioSocket.sendKey(selectAll);
     ioSocket.sendKey('Backspace');
   }
 
@@ -574,18 +589,14 @@ export class SauceLabsDriver implements MobilewrightDriver {
       throw new Error(`Unsupported hardware button on Android: ${button}`);
     }
 
-    // iOS: try socket first, fall back to WDA
+    // iOS: buttons not in the socket key mapping (checked above) go to WDA.
     const wdaName = BUTTON_WDA[button];
-    const wda = this.requireWda(session);
-    try {
-      session.ioSocket.sendKey(button);
-    } catch {
-      if (wdaName) {
-        await wda.pressButton(wdaName);
-        return;
-      }
-      throw new Error(`Unsupported hardware button on iOS: ${button}`);
+    if (wdaName) {
+      const wda = this.requireWda(session);
+      await wda.pressButton(wdaName);
+      return;
     }
+    throw new Error(`Unsupported hardware button on iOS: ${button}`);
   }
 
   // ─── Screen ──────────────────────────────────────────────────────────────────
@@ -639,14 +650,21 @@ export class SauceLabsDriver implements MobilewrightDriver {
         const installationId = result.installationId;
         if (installationId) {
           const deadline = Date.now() + 120_000;
+          let finished = false;
           while (Date.now() < deadline) {
             await new Promise((r) => setTimeout(r, 3_000));
             const { appInstallations } = await rest.listAppInstallations(sauceSessionId);
             const entry = appInstallations.find((a) => a.installationId === installationId);
             if (!entry) continue;
             debug('launchApp install+launch %s status=%s', installationId, entry.status);
-            if (entry.status === 'FINISHED') break;
+            if (entry.status === 'FINISHED') {
+              finished = true;
+              break;
+            }
             if (entry.status === 'ERROR') throw new Error(`App launch via install failed for ${storageRef}: ${JSON.stringify(entry)}`);
+          }
+          if (!finished) {
+            throw new Error(`Timed out waiting for app launch to complete: ${storageRef}`);
           }
         }
       } else {

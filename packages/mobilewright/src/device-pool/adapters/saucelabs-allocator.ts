@@ -34,9 +34,9 @@ export class SauceLabsAllocator implements DeviceAllocator {
   async release(deviceId: string): Promise<void> {
     const sessionId = this.sessionsByDeviceId.get(deviceId);
     if (sessionId) {
-      this.sessionsByDeviceId.delete(deviceId);
       debug('releasing device %s (session=%s)', deviceId, sessionId);
       await SauceLabsDriver.releaseSession(this.driverOptions, sessionId);
+      this.sessionsByDeviceId.delete(deviceId);
       debug('released device %s', deviceId);
     }
   }

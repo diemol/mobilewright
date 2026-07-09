@@ -15,11 +15,20 @@ function resolveDriver(): DriverConfig {
         apiKey: process.env['MOBILENEXT_API_KEY'],
       };
 
-    case 'saucelabs':
+    case 'saucelabs': {
+      if (!process.env['SAUCE_USERNAME'] || !process.env['SAUCE_ACCESS_KEY']) {
+        throw new Error('SAUCE_USERNAME and SAUCE_ACCESS_KEY are required for saucelabs driver');
+      }
+      const region = process.env['SAUCE_REGION'] ?? 'us-west-1';
+      const validRegions = ['us-west-1', 'eu-central-1', 'us-east-4'] as const;
+      if (!validRegions.includes(region as typeof validRegions[number])) {
+        throw new Error(`Invalid SAUCE_REGION: ${region}. Valid values: ${validRegions.join(', ')}`);
+      }
       return {
         type: 'saucelabs',
-        region: (process.env['SAUCE_REGION'] ?? 'us-west-1') as 'us-west-1' | 'eu-central-1' | 'us-east-4',
+        region: region as typeof validRegions[number],
       };
+    }
 
     case 'mobilecli':
       return { type: 'mobilecli' };

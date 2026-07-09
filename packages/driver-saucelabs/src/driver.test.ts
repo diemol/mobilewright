@@ -355,11 +355,18 @@ test.describe('SauceLabsDriver.longPress()', () => {
 });
 
 test.describe('SauceLabsDriver.clearText()', () => {
-  test('sends select-all (a) then Backspace', async () => {
-    const { driver, ioSocket } = createDriverWithSession();
+  test('sends cmd+a then Backspace on iOS', async () => {
+    const { driver, ioSocket } = createDriverWithSession({ platform: 'ios' });
     await driver.clearText();
 
-    expect(ioSocket.keyCalls).toEqual(['a', 'Backspace']);
+    expect(ioSocket.keyCalls).toEqual(['cmd+a', 'Backspace']);
+  });
+
+  test('sends ctrl+a then Backspace on Android', async () => {
+    const { driver, ioSocket } = createDriverWithSession({ platform: 'android' });
+    await driver.clearText();
+
+    expect(ioSocket.keyCalls).toEqual(['ctrl+a', 'Backspace']);
   });
 });
 
@@ -456,10 +463,8 @@ test.describe('SauceLabsDriver.pressButton()', () => {
     expect(call?.args[1]).toContain('keyevent 25');
   });
 
-  test('VOLUME_UP on iOS tries socket then falls back to WDA pressButton', async () => {
-    const { driver, wda, ioSocket } = createDriverWithSession({ platform: 'ios' });
-    // Make the socket throw to trigger the WDA fallback path
-    ioSocket.sendKey = () => { throw new Error('socket error'); };
+  test('VOLUME_UP on iOS goes directly to WDA pressButton', async () => {
+    const { driver, wda } = createDriverWithSession({ platform: 'ios' });
     await driver.pressButton('VOLUME_UP');
 
     expect(wda!.calls.find((c) => c.method === 'pressButton')?.args[0]).toBe('volumeUp');
