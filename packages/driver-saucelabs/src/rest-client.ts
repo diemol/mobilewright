@@ -118,8 +118,9 @@ function ipaFilenameFromUrl(url: string): string {
   return version ? `${version}-${base}` : base;
 }
 
-/** Bundle ID used when launching WebDriverAgent on the device. */
-export const DEFAULT_WDA_BUNDLE_ID = 'com.facebook.WebDriverAgentRunner.xctrunner';
+/** Bundle ID used when launching WebDriverAgent on the device. Falls back to SAUCE_WDA_BUNDLE_ID env var when omitted. */
+export const DEFAULT_WDA_BUNDLE_ID =
+  process.env['SAUCE_WDA_BUNDLE_ID'] ?? 'com.facebook.WebDriverAgentRunner.xctrunner';
 
 /** HTTP client for the Sauce Labs RDC v2 and App Storage APIs, used to manage sessions, devices, and app artifacts. */
 export class RestClient {
