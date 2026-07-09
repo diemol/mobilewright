@@ -17,18 +17,21 @@ function createFakeIoSocket() {
   const touchCalls: TouchCall[] = [];
   const keyCalls: string[] = [];
   let capturing = false;
-  let frames: Buffer[] = [];
+  let frames: { frame: Buffer; ts: number }[] = [];
+  let captureEndTs = 0;
 
   return {
     touchCalls,
     keyCalls,
-    setFramesToReturn(f: Buffer[]) { frames = f; },
+    setFramesToReturn(f: { frame: Buffer; ts: number }[]) { frames = f; },
+    setCaptureEndTs(ts: number) { captureEndTs = ts; },
     sendTouch(action: 'd' | 'm' | 'u', points: TouchPoint[], cw: number, ch: number, orientation: 0 | 1) {
       touchCalls.push({ action, points, cw, ch, orientation });
     },
     sendKey(key: string) { keyCalls.push(key); },
     startFrameCapture() { capturing = true; },
     stopFrameCapture() { const f = frames; capturing = false; return f; },
+    getCaptureEndTs() { return captureEndTs; },
     connect: async () => {},
     disconnect: async () => {},
     get isCapturing() { return capturing; },
@@ -520,7 +523,10 @@ test.describe('SauceLabsDriver.terminateApp()', () => {
 test.describe('SauceLabsDriver.installApp()', () => {
   test('uploads file to storage then calls installApp REST', async () => {
     const { driver, restCalls } = createDriverWithSession({
-      restResponses: { uploadToStorage: 'storage:uuid-abc' },
+      restResponses: {
+        uploadToStorage: 'storage:uuid-abc',
+        installApp: { status: 'FINISHED' },
+      },
     });
     await driver.installApp('/path/to/app.apk');
 

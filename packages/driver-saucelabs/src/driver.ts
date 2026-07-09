@@ -650,8 +650,10 @@ export class SauceLabsDriver implements MobilewrightDriver {
           }
         }
       } else {
-        const activityName = opts?.activity ?? `${bundleId}.MainActivity`;
-        await rest.launchApp(sauceSessionId, { packageName: bundleId, activityName });
+        await rest.launchApp(sauceSessionId, {
+          packageName: bundleId,
+          ...(opts?.activity ? { activityName: opts.activity } : {}),
+        });
       }
     } else {
       await rest.launchApp(sauceSessionId, { bundleId });
