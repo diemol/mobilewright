@@ -1,6 +1,6 @@
 import createDebug from 'debug';
 import type { AppInfo, ViewNode } from '@mobilewright/protocol';
-import type { RestClient } from './rest-client.js';
+import type { RestClient, CheckWebDriverAgentStatusResponse } from './rest-client.js';
 import { DEFAULT_WDA_BUNDLE_ID } from './rest-client.js';
 
 const debug = createDebug('mw:driver-saucelabs:wda');
@@ -58,6 +58,7 @@ function parseXmlViewNode(xml: string): ViewNode[] {
       identifier: attrs['name'] || undefined,
       value: attrs['value'] || undefined,
       text: attrs['label'] || undefined,
+      placeholder: attrs['placeholderValue'] || undefined,
       isVisible: attrs['visible'] !== 'false',
       isEnabled: attrs['enabled'] !== 'false',
       bounds: { x, y, width: w, height: h },
@@ -104,32 +105,46 @@ export class WdaClient {
   private async ensureInitialised(): Promise<void> {
     if (this.initialised) return;
 
-    debug('launching WDA wdaBundleId=%s wdaStorageRef=%s', this.wdaBundleId, this.wdaStorageRef);
-    if (this.wdaStorageRef) {
-      await this.rest.installApp(this.sessionId, this.wdaStorageRef, { launchAfterInstall: true });
-      await this.rest.launchWebDriverAgent(this.sessionId, {
-        bundleId: this.wdaBundleId ?? DEFAULT_WDA_BUNDLE_ID,
-      });
+    // A prior WdaClient attached to the same Sauce Labs session (e.g. an earlier test
+    // reusing this session via the device pool) may have already launched WDA. The
+    // runner process outlives that client's own close() — which only tears down its
+    // WebDriver session, not the process — so re-launching here would 409 ("WDARunner
+    // already started"). Check current status first and skip launching if it's already up.
+    const existingStatus = await this.rest.checkWebDriverAgentStatus(this.sessionId).catch(() => undefined);
+    if (existingStatus?.state === 'RUNNING' && existingStatus.devicePort) {
+      debug('WDA already running on port %d, skipping launch', existingStatus.devicePort);
+      this.wdaHost = 'localhost';
+      this.wdaPort = existingStatus.devicePort;
     } else {
-      await this.rest.launchWebDriverAgent(this.sessionId, { bundleId: this.wdaBundleId });
-    }
+      debug('launching WDA wdaBundleId=%s wdaStorageRef=%s', this.wdaBundleId, this.wdaStorageRef);
+      if (this.wdaStorageRef) {
+        await this.rest.installApp(this.sessionId, this.wdaStorageRef, { launchAfterInstall: true });
+        await this.rest.launchWebDriverAgent(this.sessionId, {
+          bundleId: this.wdaBundleId ?? DEFAULT_WDA_BUNDLE_ID,
+        });
+      } else {
+        await this.rest.launchWebDriverAgent(this.sessionId, { bundleId: this.wdaBundleId });
+      }
 
-    const deadline = Date.now() + WDA_READY_TIMEOUT_MS;
-    let lastStatus: Awaited<ReturnType<typeof this.rest.checkWebDriverAgentStatus>> | undefined;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, WDA_POLL_INTERVAL_MS));
-      lastStatus = await this.rest.checkWebDriverAgentStatus(this.sessionId);
-      debug('WDA status: %j', lastStatus);
-      if (lastStatus.state === 'RUNNING' && lastStatus.devicePort) {
-        this.wdaHost = 'localhost';
-        this.wdaPort = lastStatus.devicePort;
-        break;
+      const deadline = Date.now() + WDA_READY_TIMEOUT_MS;
+      let lastStatus: CheckWebDriverAgentStatusResponse | undefined;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, WDA_POLL_INTERVAL_MS));
+        lastStatus = await this.rest.checkWebDriverAgentStatus(this.sessionId);
+        debug('WDA status: %j', lastStatus);
+        if (lastStatus.state === 'RUNNING' && lastStatus.devicePort) {
+          this.wdaHost = 'localhost';
+          this.wdaPort = lastStatus.devicePort;
+          break;
+        }
+      }
+
+      if (!this.wdaHost || !this.wdaPort) {
+        throw new Error(`Timed out waiting for WDA to become RUNNING (last status: ${JSON.stringify(lastStatus)})`);
       }
     }
 
-    if (!this.wdaHost || !this.wdaPort) {
-      throw new Error(`Timed out waiting for WDA to become RUNNING (last status: ${JSON.stringify(lastStatus)})`);
-    }
+    const deadline = Date.now() + WDA_READY_TIMEOUT_MS;
 
     // WDA may not yet accept connections immediately after reaching RUNNING.
     // Retry POST /session until it succeeds or the deadline is hit.

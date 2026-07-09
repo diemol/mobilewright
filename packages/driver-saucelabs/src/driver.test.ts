@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { AppInfo, ViewNode } from '@mobilewright/protocol';
-import { SauceLabsDriver } from './driver.js';
+import { SauceLabsDriver, waitForActiveSession } from './driver.js';
 import type { TouchPoint } from './device-control-socket.js';
 
 // ─── Fake helpers ────────────────────────────────────────────────────────────
@@ -91,6 +91,7 @@ interface SessionOptions {
   currentOrientation?: 'PORTRAIT' | 'LANDSCAPE';
   restResponses?: Record<string, unknown>;
   wdaResponses?: Record<string, unknown>;
+  ownsSession?: boolean;
 }
 
 /**
@@ -106,6 +107,7 @@ function createDriverWithSession(opts: SessionOptions = {}) {
 
   (driver as any).session = {
     sauceSessionId: 'sess-123',
+    ownsSession: opts.ownsSession ?? true,
     platform,
     deviceId: 'iPhone_15_real',
     resolutionWidth: opts.resolutionWidth ?? 1170,
@@ -286,6 +288,36 @@ test.describe('SauceLabsDriver.tap()', () => {
     expect(ioSocket.touchCalls[0].cw).toBe(1920);
     expect(ioSocket.touchCalls[0].ch).toBe(1080);
     expect(ioSocket.touchCalls[0].orientation).toBe(1);
+  });
+
+  test('on iOS, scales pixel resolution down to points by pixelsPerPoint (WDA bounds are point-space)', async () => {
+    const { driver, ioSocket } = createDriverWithSession({
+      platform: 'ios',
+      resolutionWidth: 1170,
+      resolutionHeight: 2532,
+      pixelsPerPoint: 3,
+      currentOrientation: 'PORTRAIT',
+    });
+    await driver.tap(195, 768);
+
+    expect(ioSocket.touchCalls[0].cw).toBe(390);
+    expect(ioSocket.touchCalls[0].ch).toBe(844);
+    // x/y themselves are passed through unchanged — they already come in as points.
+    expect(ioSocket.touchCalls[0].points[0]).toMatchObject({ x: 195, y: 768 });
+  });
+
+  test('on Android, does not scale canvas dimensions even if pixelsPerPoint is not 1 (uiautomator bounds are already pixel-space)', async () => {
+    const { driver, ioSocket } = createDriverWithSession({
+      platform: 'android',
+      resolutionWidth: 1080,
+      resolutionHeight: 2400,
+      pixelsPerPoint: 2.75,
+      currentOrientation: 'PORTRAIT',
+    });
+    await driver.tap(540, 1200);
+
+    expect(ioSocket.touchCalls[0].cw).toBe(1080);
+    expect(ioSocket.touchCalls[0].ch).toBe(2400);
   });
 });
 
@@ -626,6 +658,39 @@ test.describe('SauceLabsDriver.applyDeviceSettings()', () => {
   });
 });
 
+// ─── Disconnect ──────────────────────────────────────────────────────────────
+
+test.describe('SauceLabsDriver.disconnect()', () => {
+  test('deletes the Sauce Labs session when this driver created it', async () => {
+    const { driver, restCalls } = createDriverWithSession({ ownsSession: true });
+    await driver.disconnect();
+
+    const call = restCalls.find((c) => c.method === 'deleteSession');
+    expect(call?.args[0]).toBe('sess-123');
+  });
+
+  test('leaves the Sauce Labs session alive when this driver only attached to it', async () => {
+    const { driver, restCalls } = createDriverWithSession({ ownsSession: false });
+    await driver.disconnect();
+
+    const call = restCalls.find((c) => c.method === 'deleteSession');
+    expect(call).toBeUndefined();
+  });
+
+  test('still closes local sockets and WDA when not owning the session', async () => {
+    const { driver, ioSocket, wda } = createDriverWithSession({ ownsSession: false, platform: 'ios' });
+    let ioClosed = false;
+    ioSocket.disconnect = async () => { ioClosed = true; };
+    let wdaClosed = false;
+    wda!.close = async () => { wdaClosed = true; };
+
+    await driver.disconnect();
+
+    expect(ioClosed).toBe(true);
+    expect(wdaClosed).toBe(true);
+  });
+});
+
 // ─── Device list ─────────────────────────────────────────────────────────────
 
 test.describe('SauceLabsDriver.listDevices()', () => {
@@ -749,15 +814,7 @@ test.describe('SauceLabsDriver.getViewHierarchy()', () => {
 
 // ─── waitForActive ────────────────────────────────────────────────────────────
 
-test.describe('SauceLabsDriver.waitForActive()', () => {
-  function makeDriver(allocationTimeout?: number) {
-    return new SauceLabsDriver({
-      username: 'u',
-      accessKey: 'k',
-      ...(allocationTimeout !== undefined ? { allocationTimeout } : {}),
-    });
-  }
-
+test.describe('waitForActiveSession()', () => {
   function fakeRestReturning(states: Array<{ state: string; links?: Record<string, string> }>) {
     let i = 0;
     return {
@@ -769,7 +826,6 @@ test.describe('SauceLabsDriver.waitForActive()', () => {
   }
 
   test('returns session when state is ACTIVE and links are present', async () => {
-    const driver = makeDriver();
     // Override setTimeout so the test does not actually sleep 5s.
     const origTimeout = globalThis.setTimeout;
     (globalThis as any).setTimeout = (fn: () => void, _ms?: number) => origTimeout(fn, 0);
@@ -777,7 +833,7 @@ test.describe('SauceLabsDriver.waitForActive()', () => {
       const rest = fakeRestReturning([
         { state: 'ACTIVE', links: { ioWebsocketUrl: 'wss://io', eventsWebsocketUrl: 'wss://ev' } },
       ]);
-      const session = await (driver as any).waitForActive(rest, 'sess-1');
+      const session = await waitForActiveSession(rest as any, 'sess-1', 60_000);
       expect(session.state).toBe('ACTIVE');
     } finally {
       (globalThis as any).setTimeout = origTimeout;
@@ -785,7 +841,6 @@ test.describe('SauceLabsDriver.waitForActive()', () => {
   });
 
   test('keeps polling when ACTIVE but links are missing', async () => {
-    const driver = makeDriver();
     const origTimeout = globalThis.setTimeout;
     (globalThis as any).setTimeout = (fn: () => void, _ms?: number) => origTimeout(fn, 0);
     try {
@@ -794,7 +849,7 @@ test.describe('SauceLabsDriver.waitForActive()', () => {
         { state: 'ACTIVE' },
         { state: 'ACTIVE', links: { ioWebsocketUrl: 'wss://io', eventsWebsocketUrl: 'wss://ev' } },
       ]);
-      const session = await (driver as any).waitForActive(rest, 'sess-1');
+      const session = await waitForActiveSession(rest as any, 'sess-1', 60_000);
       expect(session.links?.ioWebsocketUrl).toBe('wss://io');
     } finally {
       (globalThis as any).setTimeout = origTimeout;
@@ -802,36 +857,34 @@ test.describe('SauceLabsDriver.waitForActive()', () => {
   });
 
   test('throws immediately on ERRORED state', async () => {
-    const driver = makeDriver();
     const origTimeout = globalThis.setTimeout;
     (globalThis as any).setTimeout = (fn: () => void, _ms?: number) => origTimeout(fn, 0);
     try {
       const rest = fakeRestReturning([{ state: 'ERRORED' }]);
-      await expect((driver as any).waitForActive(rest, 'sess-1')).rejects.toThrow('ERRORED');
+      await expect(waitForActiveSession(rest as any, 'sess-1', 60_000)).rejects.toThrow('ERRORED');
     } finally {
       (globalThis as any).setTimeout = origTimeout;
     }
   });
 
   test('throws immediately on CLOSED state', async () => {
-    const driver = makeDriver();
     const origTimeout = globalThis.setTimeout;
     (globalThis as any).setTimeout = (fn: () => void, _ms?: number) => origTimeout(fn, 0);
     try {
       const rest = fakeRestReturning([{ state: 'CLOSED' }]);
-      await expect((driver as any).waitForActive(rest, 'sess-1')).rejects.toThrow('CLOSED');
+      await expect(waitForActiveSession(rest as any, 'sess-1', 60_000)).rejects.toThrow('CLOSED');
     } finally {
       (globalThis as any).setTimeout = origTimeout;
     }
   });
 
   test('throws timeout error when deadline is exceeded', async () => {
-    const driver = makeDriver(0); // zero-length timeout → deadline already passed
     const origTimeout = globalThis.setTimeout;
     (globalThis as any).setTimeout = (fn: () => void, _ms?: number) => origTimeout(fn, 0);
     try {
       const rest = fakeRestReturning([{ state: 'PENDING' }]);
-      await expect((driver as any).waitForActive(rest, 'sess-1')).rejects.toThrow('Timed out');
+      // zero-length timeout → deadline already passed
+      await expect(waitForActiveSession(rest as any, 'sess-1', 0)).rejects.toThrow('Timed out');
     } finally {
       (globalThis as any).setTimeout = origTimeout;
     }

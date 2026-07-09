@@ -88,6 +88,9 @@ const BUTTON_WDA: Partial<Record<HardwareButton, string>> = {
 
 interface ActiveSession {
   sauceSessionId: string;
+  /** True if this driver created the Sauce Labs session (and must delete it on disconnect);
+   * false if it only attached to a session created elsewhere (e.g. by the device pool allocator). */
+  ownsSession: boolean;
   platform: Platform;
   deviceId: string;
   resolutionWidth: number;
@@ -97,6 +100,45 @@ interface ActiveSession {
   ioSocket: DeviceControlSocket;
   companionSocket: CompanionSocket;
   wdaClient: WdaClient | null;
+}
+
+/** Polls a Sauce Labs session every 5 seconds until it is ACTIVE with control links, or throws
+ * on timeout or terminal error. */
+export async function waitForActiveSession(
+  rest: RestClient,
+  sessionId: string,
+  timeout: number,
+  opts: { skipInitialDelay?: boolean } = {},
+): Promise<import('./rest-client.js').Session> {
+  const pollInterval = 5_000;
+  const deadline = Date.now() + timeout;
+
+  // Device allocation takes at least several seconds — sleep before the first poll,
+  // unless the caller already knows the session is likely active (e.g. attaching to
+  // a session the pool already waited on).
+  if (!opts.skipInitialDelay) {
+    await new Promise((r) => setTimeout(r, pollInterval));
+  }
+
+  while (Date.now() < deadline) {
+    const s = await rest.getSession(sessionId);
+    const hasLinks = !!(s.links?.ioWebsocketUrl && s.links?.eventsWebsocketUrl);
+    debug('polling session %s state=%s links=%s', sessionId, s.state, hasLinks);
+    if (s.state === 'ACTIVE' && hasLinks) return s;
+    if (s.state === 'ERRORED' || s.state === 'CLOSED') {
+      throw new Error(`Session ${sessionId} reached terminal state: ${s.state}`);
+    }
+    await new Promise((r) => setTimeout(r, pollInterval));
+  }
+  throw new Error(`Timed out waiting for session ${sessionId} to become ACTIVE`);
+}
+
+function resolveCredentials(options: SauceLabsDriverOptions): { username: string; accessKey: string } {
+  const username = options.username ?? process.env['SAUCE_USERNAME'];
+  const accessKey = options.accessKey ?? process.env['SAUCE_ACCESS_KEY'];
+  if (!username) throw new Error('Sauce Labs username is required. Set options.username or SAUCE_USERNAME env var.');
+  if (!accessKey) throw new Error('Sauce Labs access key is required. Set options.accessKey or SAUCE_ACCESS_KEY env var.');
+  return { username, accessKey };
 }
 
 // ─── Helper parsers ───────────────────────────────────────────────────────────
@@ -151,28 +193,29 @@ export class SauceLabsDriver implements MobilewrightDriver {
 
   constructor(options: SauceLabsDriverOptions = {}) {
     this.options = options;
-    const username = options.username ?? process.env['SAUCE_USERNAME'];
-    const accessKey = options.accessKey ?? process.env['SAUCE_ACCESS_KEY'];
-    if (!username) throw new Error('Sauce Labs username is required. Set options.username or SAUCE_USERNAME env var.');
-    if (!accessKey) throw new Error('Sauce Labs access key is required. Set options.accessKey or SAUCE_ACCESS_KEY env var.');
+    const { username, accessKey } = resolveCredentials(options);
     this.username = username;
     this.accessKey = accessKey;
   }
 
   // ─── Connection ─────────────────────────────────────────────────────────────
 
-  /** Allocates a real device on Sauce Labs, waits for it to become active, and opens the device control and companion WebSocket channels. */
-  async connect(config: ConnectionConfig): Promise<Session> {
-    const rest = new RestClient(
-      this.username,
-      this.accessKey,
-      this.options.region ?? 'us-west-1',
-    );
+  /**
+   * Reserves a device on Sauce Labs and waits for the session to become ACTIVE, without
+   * opening any device control sockets. Intended for the device pool allocator, which only
+   * needs to resolve and hold a device — the returned sessionId is later passed to connect()
+   * via `ConnectionConfig.sessionId` so the actual test worker can attach to the same session
+   * instead of allocating a second device. Pair with `releaseSession()`.
+   */
+  static async allocateSession(
+    options: SauceLabsDriverOptions,
+    config: Pick<ConnectionConfig, 'platform' | 'deviceName'>,
+  ): Promise<{ sessionId: string; deviceId: string }> {
+    const { username, accessKey } = resolveCredentials(options);
+    const rest = new RestClient(username, accessKey, options.region ?? 'us-west-1');
+    const os: DeviceOs = config.platform === 'android' ? 'ANDROID' : 'IOS';
 
-    const platform = config.platform;
-    const os: DeviceOs = platform === 'android' ? 'ANDROID' : 'IOS';
-
-    debug('creating session platform=%s', platform);
+    debug('allocateSession platform=%s', config.platform);
     const creation = await rest.createSession({
       device: {
         os,
@@ -180,19 +223,71 @@ export class SauceLabsDriver implements MobilewrightDriver {
           ? { deviceName: typeof config.deviceName === 'string' ? config.deviceName : config.deviceName.source }
           : {}),
       },
-      ...(this.options.sessionDuration
-        ? { configuration: { sessionDuration: this.options.sessionDuration } }
+      ...(options.sessionDuration
+        ? { configuration: { sessionDuration: options.sessionDuration } }
         : {}),
     });
+    debug('allocateSession created id=%s state=%s', creation.id, creation.state);
 
-    debug('session created id=%s state=%s', creation.id, creation.state);
+    const active = await waitForActiveSession(rest, creation.id, options.allocationTimeout ?? 300_000);
+    const deviceId = active.device?.descriptor ?? creation.id;
+    debug('allocateSession ACTIVE id=%s deviceId=%s', creation.id, deviceId);
+    return { sessionId: creation.id, deviceId };
+  }
 
-    // Poll until ACTIVE
-    const sauceSession = await this.waitForActive(rest, creation.id);
+  /** Deletes a session previously created via `allocateSession()`, releasing the device back to Sauce Labs. */
+  static async releaseSession(options: SauceLabsDriverOptions, sessionId: string): Promise<void> {
+    const { username, accessKey } = resolveCredentials(options);
+    const rest = new RestClient(username, accessKey, options.region ?? 'us-west-1');
+    await rest.deleteSession(sessionId);
+  }
+
+  /**
+   * Opens the device control and companion WebSocket channels for a Sauce Labs session.
+   * Creates a new session unless `config.sessionId` is given, in which case it attaches to
+   * an already-active session (e.g. one created via `allocateSession()`) instead of
+   * allocating a second device.
+   */
+  async connect(config: ConnectionConfig): Promise<Session> {
+    const rest = this.makeRest();
+
+    const platform = config.platform;
+    const os: DeviceOs = platform === 'android' ? 'ANDROID' : 'IOS';
+
+    let sauceSessionId: string;
+    const ownsSession = !config.sessionId;
+    if (config.sessionId) {
+      debug('attaching to existing session %s', config.sessionId);
+      sauceSessionId = config.sessionId;
+    } else {
+      debug('creating session platform=%s', platform);
+      const creation = await rest.createSession({
+        device: {
+          os,
+          ...(config.deviceName
+            ? { deviceName: typeof config.deviceName === 'string' ? config.deviceName : config.deviceName.source }
+            : {}),
+        },
+        ...(this.options.sessionDuration
+          ? { configuration: { sessionDuration: this.options.sessionDuration } }
+          : {}),
+      });
+      debug('session created id=%s state=%s', creation.id, creation.state);
+      sauceSessionId = creation.id;
+    }
+
+    // Poll until ACTIVE. Attached sessions were already waited on by the allocator, so skip
+    // the unconditional pre-poll delay in that case.
+    const sauceSession = await waitForActiveSession(
+      rest,
+      sauceSessionId,
+      this.options.allocationTimeout ?? 300_000,
+      { skipInitialDelay: !ownsSession },
+    );
     debug('session ACTIVE, descriptor=%s', sauceSession.device?.descriptor);
 
-    const descriptor = sauceSession.device?.descriptor ?? creation.id;
-    // waitForActive() guarantees links are present before returning.
+    const descriptor = sauceSession.device?.descriptor ?? sauceSessionId;
+    // waitForActiveSession() guarantees links are present before returning.
     const links = sauceSession.links!;
 
     // Fetch device descriptor for screen metrics
@@ -232,7 +327,8 @@ export class SauceLabsDriver implements MobilewrightDriver {
     }
 
     this.session = {
-      sauceSessionId: creation.id,
+      sauceSessionId,
+      ownsSession,
       platform,
       deviceId: descriptor,
       resolutionWidth,
@@ -241,7 +337,7 @@ export class SauceLabsDriver implements MobilewrightDriver {
       currentOrientation: defaultOrientation,
       ioSocket,
       companionSocket,
-      wdaClient: platform === 'ios' ? new WdaClient(rest, creation.id, this.options.iosWdaBundleId, wdaStorageRef) : null,
+      wdaClient: platform === 'ios' ? new WdaClient(rest, sauceSessionId, this.options.iosWdaBundleId, wdaStorageRef) : null,
     };
 
     companionSocket.onOrientationFinish((orientation) => {
@@ -251,32 +347,14 @@ export class SauceLabsDriver implements MobilewrightDriver {
       }
     });
 
-    return { deviceId: descriptor, platform };
+    return { deviceId: descriptor, platform, sessionId: sauceSessionId };
   }
 
-  /** Polls the session state every 5 seconds until the device is ACTIVE with control links, or throws on timeout or terminal error. */
-  private async waitForActive(rest: RestClient, sessionId: string): Promise<import('./rest-client.js').Session> {
-    const timeout = this.options.allocationTimeout ?? 300_000;
-    const pollInterval = 5_000;
-    const deadline = Date.now() + timeout;
-
-    // Device allocation takes at least several seconds — sleep before the first poll.
-    await new Promise((r) => setTimeout(r, pollInterval));
-
-    while (Date.now() < deadline) {
-      const s = await rest.getSession(sessionId);
-      const hasLinks = !!(s.links?.ioWebsocketUrl && s.links?.eventsWebsocketUrl);
-      debug('polling session %s state=%s links=%s', sessionId, s.state, hasLinks);
-      if (s.state === 'ACTIVE' && hasLinks) return s;
-      if (s.state === 'ERRORED' || s.state === 'CLOSED') {
-        throw new Error(`Session ${sessionId} reached terminal state: ${s.state}`);
-      }
-      await new Promise((r) => setTimeout(r, pollInterval));
-    }
-    throw new Error(`Timed out waiting for session ${sessionId} to become ACTIVE`);
-  }
-
-  /** Closes the WDA session (iOS), disconnects both WebSockets, and deletes the Sauce Labs session to release the device. */
+  /**
+   * Closes the WDA session (iOS) and disconnects both WebSockets. Only deletes the underlying
+   * Sauce Labs session (releasing the device) when this driver created it — a driver attached
+   * via `ConnectionConfig.sessionId` leaves the session alive for other callers to reuse.
+   */
   async disconnect(): Promise<void> {
     const session = this.requireSession();
     const rest = this.makeRest();
@@ -290,9 +368,11 @@ export class SauceLabsDriver implements MobilewrightDriver {
       session.companionSocket.disconnect(),
     ]);
 
-    await rest.deleteSession(session.sauceSessionId);
+    if (session.ownsSession) {
+      await rest.deleteSession(session.sauceSessionId);
+    }
     this.session = null;
-    debug('disconnected');
+    debug('disconnected (ownsSession=%s)', session.ownsSession);
   }
 
   // ─── Device settings ─────────────────────────────────────────────────────────
@@ -326,13 +406,27 @@ export class SauceLabsDriver implements MobilewrightDriver {
 
   // ─── Input ───────────────────────────────────────────────────────────────────
 
+  /**
+   * Canvas size and orientation flag used to normalize touch coordinates for
+   * sendTouch(). WDA reports iOS element bounds in points, so the canvas is
+   * scaled down from resolutionWidth/resolutionHeight (pixels) by pixelsPerPoint
+   * to match; Android's uiautomator bounds are already pixel-space and need no
+   * scaling.
+   */
+  private touchFrame(session: ActiveSession): { cw: number; ch: number; orientation: 0 | 1 } {
+    const scale = session.platform === 'ios' ? (session.pixelsPerPoint || 1) : 1;
+    const w = session.resolutionWidth / scale;
+    const h = session.resolutionHeight / scale;
+    const orientation: 0 | 1 = session.currentOrientation === 'LANDSCAPE' ? 1 : 0;
+    return orientation === 1 ? { cw: h, ch: w, orientation } : { cw: w, ch: h, orientation };
+  }
+
   /** Sends a touch-down then touch-up at the given logical coordinates over the device control socket. */
   async tap(x: number, y: number): Promise<void> {
-    const { ioSocket, resolutionWidth, resolutionHeight, currentOrientation } = this.requireSession();
-    const orientation = currentOrientation === 'LANDSCAPE' ? 1 : 0;
-    const [cw, ch] = orientation === 1 ? [resolutionHeight, resolutionWidth] : [resolutionWidth, resolutionHeight];
-    ioSocket.sendTouch('d', [{ x, y, index: 0 }], cw, ch, orientation);
-    ioSocket.sendTouch('u', [{ x, y, index: 0 }], cw, ch, orientation);
+    const session = this.requireSession();
+    const { cw, ch, orientation } = this.touchFrame(session);
+    session.ioSocket.sendTouch('d', [{ x, y, index: 0 }], cw, ch, orientation);
+    session.ioSocket.sendTouch('u', [{ x, y, index: 0 }], cw, ch, orientation);
   }
 
   /** Performs two taps at the same coordinates with a 100 ms gap between them. */
@@ -344,12 +438,11 @@ export class SauceLabsDriver implements MobilewrightDriver {
 
   /** Holds a touch-down for the given duration (ms) before lifting, simulating a long press. */
   async longPress(x: number, y: number, duration = 500): Promise<void> {
-    const { ioSocket, resolutionWidth, resolutionHeight, currentOrientation } = this.requireSession();
-    const orientation = currentOrientation === 'LANDSCAPE' ? 1 : 0;
-    const [cw, ch] = orientation === 1 ? [resolutionHeight, resolutionWidth] : [resolutionWidth, resolutionHeight];
-    ioSocket.sendTouch('d', [{ x, y, index: 0 }], cw, ch, orientation);
+    const session = this.requireSession();
+    const { cw, ch, orientation } = this.touchFrame(session);
+    session.ioSocket.sendTouch('d', [{ x, y, index: 0 }], cw, ch, orientation);
     await new Promise((r) => setTimeout(r, duration));
-    ioSocket.sendTouch('u', [{ x, y, index: 0 }], cw, ch, orientation);
+    session.ioSocket.sendTouch('u', [{ x, y, index: 0 }], cw, ch, orientation);
   }
 
   /** Types text via socket key events for ASCII; falls back to adb `input text` for non-ASCII on Android, or character-by-character on iOS. */
@@ -390,9 +483,8 @@ export class SauceLabsDriver implements MobilewrightDriver {
   /** Interpolates a swipe in the given direction as a series of touch-move events spread across the specified duration. */
   async swipe(direction: SwipeDirection, opts?: SwipeOptions): Promise<void> {
     const session = this.requireSession();
-    const { resolutionWidth: w, resolutionHeight: h, currentOrientation, ioSocket } = session;
-    const orientation = currentOrientation === 'LANDSCAPE' ? 1 : 0;
-    const [cw, ch] = orientation === 1 ? [h, w] : [w, h];
+    const { ioSocket } = session;
+    const { cw, ch, orientation } = this.touchFrame(session);
 
     const centerX = cw / 2;
     const centerY = ch / 2;
@@ -430,9 +522,8 @@ export class SauceLabsDriver implements MobilewrightDriver {
   /** Replays a multi-pointer gesture by dispatching touch events for each pointer at their recorded timestamps. */
   async gesture(gestures: GestureSequence): Promise<void> {
     const session = this.requireSession();
-    const { resolutionWidth: w, resolutionHeight: h, currentOrientation, ioSocket } = session;
-    const orientation = currentOrientation === 'LANDSCAPE' ? 1 : 0;
-    const [cw, ch] = orientation === 1 ? [h, w] : [w, h];
+    const { ioSocket } = session;
+    const { cw, ch, orientation } = this.touchFrame(session);
     const pointers = gestures.pointers;
 
     // Collect all unique timestamps, sorted
@@ -555,7 +646,7 @@ export class SauceLabsDriver implements MobilewrightDriver {
             if (!entry) continue;
             debug('launchApp install+launch %s status=%s', installationId, entry.status);
             if (entry.status === 'FINISHED') break;
-            if (entry.status === 'ERROR') throw new Error(`App launch via install failed for ${storageRef}`);
+            if (entry.status === 'ERROR') throw new Error(`App launch via install failed for ${storageRef}: ${JSON.stringify(entry)}`);
           }
         }
       } else {
@@ -603,7 +694,7 @@ export class SauceLabsDriver implements MobilewrightDriver {
       if (!entry) continue;
       debug('install %s status=%s', installationId, entry.status);
       if (entry.status === 'FINISHED') return;
-      if (entry.status === 'ERROR') throw new Error(`App installation failed for ${storageRef}`);
+      if (entry.status === 'ERROR') throw new Error(`App installation failed for ${storageRef}: ${JSON.stringify(entry)}`);
     }
     throw new Error(`Timed out waiting for app installation to complete: ${storageRef}`);
   }
