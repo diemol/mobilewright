@@ -355,18 +355,11 @@ test.describe('SauceLabsDriver.longPress()', () => {
 });
 
 test.describe('SauceLabsDriver.clearText()', () => {
-  test('sends cmd+a then Backspace on iOS', async () => {
-    const { driver, ioSocket } = createDriverWithSession({ platform: 'ios' });
+  test('sends select-all (a) then Backspace', async () => {
+    const { driver, ioSocket } = createDriverWithSession();
     await driver.clearText();
 
-    expect(ioSocket.keyCalls).toEqual(['cmd+a', 'Backspace']);
-  });
-
-  test('sends ctrl+a then Backspace on Android', async () => {
-    const { driver, ioSocket } = createDriverWithSession({ platform: 'android' });
-    await driver.clearText();
-
-    expect(ioSocket.keyCalls).toEqual(['ctrl+a', 'Backspace']);
+    expect(ioSocket.keyCalls).toEqual(['a', 'Backspace']);
   });
 });
 

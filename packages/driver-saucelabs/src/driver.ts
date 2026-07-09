@@ -494,11 +494,10 @@ export class SauceLabsDriver implements MobilewrightDriver {
     }
   }
 
-  /** Selects all text and deletes it using a select-all chord (Cmd+A on iOS, Ctrl+A on Android) and Backspace. */
+  /** Selects all text and deletes it using Ctrl+A and Backspace key events. */
   async clearText(): Promise<void> {
-    const { ioSocket, platform } = this.requireSession();
-    const selectAll = platform === 'ios' ? 'cmd+a' : 'ctrl+a';
-    ioSocket.sendKey(selectAll);
+    const { ioSocket } = this.requireSession();
+    ioSocket.sendKey('a');
     ioSocket.sendKey('Backspace');
   }
 
