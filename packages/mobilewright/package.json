@@ -37,7 +37,7 @@
     "@mobilewright/core": "^0.0.1",
     "@mobilewright/driver-mobilecli": "^0.0.1",
     "@mobilewright/driver-mobilenext": "^0.0.1",
-    "@mobilewright/driver-saucelabs": "*",
+    "@mobilewright/driver-saucelabs": "^0.0.1",
     "@mobilewright/inspector": "^0.0.1",
     "@mobilewright/protocol": "^0.0.1",
     "commander": "^14.0.3",
