@@ -279,96 +279,97 @@ export class SauceLabsDriver implements MobilewrightDriver {
       sauceSessionId = creation.id;
     }
 
-    // Poll until ACTIVE. Attached sessions were already waited on by the allocator, so skip
-    // the unconditional pre-poll delay in that case.
-    const sauceSession = await waitForActiveSession(
-      rest,
-      sauceSessionId,
-      this.options.allocationTimeout ?? 300_000,
-      { skipInitialDelay: !ownsSession },
-    );
-    debug('session ACTIVE, descriptor=%s', sauceSession.device?.descriptor);
-
-    const descriptor = sauceSession.device?.descriptor ?? sauceSessionId;
-    // waitForActiveSession() guarantees links are present before returning.
-    const links = sauceSession.links!;
-
-    if (SHOW_LIVE_VIEW && links.liveViewUrl) {
-      console.log(`📱 Sauce Labs live view (${descriptor}): 🔗 ${links.liveViewUrl}`);
-    }
-
-    // Fetch device descriptor for screen metrics
-    let resolutionWidth = 1080;
-    let resolutionHeight = 1920;
-    let pixelsPerPoint = 1;
-    let defaultOrientation: 'PORTRAIT' | 'LANDSCAPE' = 'PORTRAIT';
-
+    // Everything below can fail before this.session is assigned, at which point disconnect()
+    // has nothing to clean up — so any failure in this block must release whatever we created
+    // (owned session, connected sockets) directly instead of leaking it.
+    let ioSocket: DeviceControlSocket | undefined;
+    let companionSocket: CompanionSocket | undefined;
     try {
-      const descriptors = await rest.listDevices();
-      const desc = descriptors.find((d) => d.id === descriptor);
-      if (desc) {
-        resolutionWidth = desc.resolutionWidth ?? resolutionWidth;
-        resolutionHeight = desc.resolutionHeight ?? resolutionHeight;
-        pixelsPerPoint = desc.pixelsPerPoint ?? pixelsPerPoint;
-        defaultOrientation = parseOrientation(desc.defaultOrientation);
+      // Poll until ACTIVE. Attached sessions were already waited on by the allocator, so skip
+      // the unconditional pre-poll delay in that case.
+      const sauceSession = await waitForActiveSession(
+        rest,
+        sauceSessionId,
+        this.options.allocationTimeout ?? 300_000,
+        { skipInitialDelay: !ownsSession },
+      );
+      debug('session ACTIVE, descriptor=%s', sauceSession.device?.descriptor);
+
+      const descriptor = sauceSession.device?.descriptor ?? sauceSessionId;
+      // waitForActiveSession() guarantees links are present before returning.
+      const links = sauceSession.links!;
+
+      if (SHOW_LIVE_VIEW && links.liveViewUrl) {
+        console.log(`📱 Sauce Labs live view (${descriptor}): 🔗 ${links.liveViewUrl}`);
       }
-    } catch (err) {
-      debug('failed to fetch device descriptor: %s', (err as Error).message);
-    }
 
-    const ioSocket = new DeviceControlSocket(links.ioWebsocketUrl, this.username, this.accessKey);
-    const companionSocket = new CompanionSocket(links.eventsWebsocketUrl, this.username, this.accessKey);
+      // Fetch device descriptor for screen metrics
+      let resolutionWidth = 1080;
+      let resolutionHeight = 1920;
+      let pixelsPerPoint = 1;
+      let defaultOrientation: 'PORTRAIT' | 'LANDSCAPE' = 'PORTRAIT';
 
-    try {
+      try {
+        const descriptors = await rest.listDevices();
+        const desc = descriptors.find((d) => d.id === descriptor);
+        if (desc) {
+          resolutionWidth = desc.resolutionWidth ?? resolutionWidth;
+          resolutionHeight = desc.resolutionHeight ?? resolutionHeight;
+          pixelsPerPoint = desc.pixelsPerPoint ?? pixelsPerPoint;
+          defaultOrientation = parseOrientation(desc.defaultOrientation);
+        }
+      } catch (err) {
+        debug('failed to fetch device descriptor: %s', (err as Error).message);
+      }
+
+      ioSocket = new DeviceControlSocket(links.ioWebsocketUrl, this.username, this.accessKey);
+      companionSocket = new CompanionSocket(links.eventsWebsocketUrl, this.username, this.accessKey);
       await Promise.all([ioSocket.connect(), companionSocket.connect()]);
+
+      let wdaStorageRef: string | undefined;
+      if (platform === 'ios') {
+        const wdaSource = this.options.iosWdaStorageRef ?? DEFAULT_WDA_URL;
+        if (wdaSource.startsWith('storage:')) {
+          wdaStorageRef = wdaSource;
+        } else {
+          debug('uploading WDA from URL: %s', wdaSource);
+          wdaStorageRef = await rest.uploadWdaToStorage(wdaSource);
+          debug('WDA ready at %s', wdaStorageRef);
+        }
+      }
+
+      this.session = {
+        sauceSessionId,
+        ownsSession,
+        platform,
+        deviceId: descriptor,
+        resolutionWidth,
+        resolutionHeight,
+        pixelsPerPoint,
+        currentOrientation: defaultOrientation,
+        ioSocket,
+        companionSocket,
+        wdaClient: platform === 'ios' ? new WdaClient(rest, sauceSessionId, this.options.iosWdaBundleId, wdaStorageRef) : null,
+      };
+
+      companionSocket.onOrientationFinish((orientation) => {
+        debug('orientation changed to %s', orientation);
+        if (this.session) {
+          this.session.currentOrientation = orientation;
+        }
+      });
+
+      return { deviceId: descriptor, platform, sessionId: sauceSessionId };
     } catch (err) {
-      // Clean up any successfully connected sockets before propagating the error
-      await ioSocket.disconnect().catch(() => {});
-      await companionSocket.disconnect().catch(() => {});
+      await ioSocket?.disconnect().catch(() => {});
+      await companionSocket?.disconnect().catch(() => {});
       if (ownsSession) {
-        // this.session is still unset, so disconnect() can't release the session we just
-        // created — delete it directly here instead of leaking it.
         await rest.deleteSession(sauceSessionId).catch((deleteErr) =>
-          debug('session cleanup error after socket connect failure: %s', (deleteErr as Error).message),
+          debug('session cleanup error after connect failure: %s', (deleteErr as Error).message),
         );
       }
       throw err;
     }
-
-    let wdaStorageRef: string | undefined;
-    if (platform === 'ios') {
-      const wdaSource = this.options.iosWdaStorageRef ?? DEFAULT_WDA_URL;
-      if (wdaSource.startsWith('storage:')) {
-        wdaStorageRef = wdaSource;
-      } else {
-        debug('uploading WDA from URL: %s', wdaSource);
-        wdaStorageRef = await rest.uploadWdaToStorage(wdaSource);
-        debug('WDA ready at %s', wdaStorageRef);
-      }
-    }
-
-    this.session = {
-      sauceSessionId,
-      ownsSession,
-      platform,
-      deviceId: descriptor,
-      resolutionWidth,
-      resolutionHeight,
-      pixelsPerPoint,
-      currentOrientation: defaultOrientation,
-      ioSocket,
-      companionSocket,
-      wdaClient: platform === 'ios' ? new WdaClient(rest, sauceSessionId, this.options.iosWdaBundleId, wdaStorageRef) : null,
-    };
-
-    companionSocket.onOrientationFinish((orientation) => {
-      debug('orientation changed to %s', orientation);
-      if (this.session) {
-        this.session.currentOrientation = orientation;
-      }
-    });
-
-    return { deviceId: descriptor, platform, sessionId: sauceSessionId };
   }
 
   /**
