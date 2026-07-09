@@ -146,6 +146,7 @@ export const test = base.extend<MobilewrightTestFixtures>({
       appLaunchTimeout: merged.use?.appLaunchTimeout,
       installTimeout: merged.use?.installTimeout,
       deviceSettings: { animations: merged.use?.animations },
+      sessionId: handle.sessionId,
     });
     debug('connected to device %s', handle.deviceId);
 
@@ -217,8 +218,8 @@ export const test = base.extend<MobilewrightTestFixtures>({
         const buf = await device.screen.screenshot();
         const label = failed ? 'screenshot-on-failure' : 'screenshot';
         await testInfo.attach(label, { body: buf, contentType: 'image/png' });
-      } catch {
-        // device may be disconnected
+      } catch (err) {
+        debug('screenshot attach failed: %o', err);
       }
     }
 
@@ -227,8 +228,8 @@ export const test = base.extend<MobilewrightTestFixtures>({
         try {
           const buf = await device.screen.screenshot();
           await testInfo.attach('screenshot-on-failure', { body: buf, contentType: 'image/png' });
-        } catch {
-          // device may be disconnected
+        } catch (err) {
+          debug('screenshot-on-failure attach failed: %o', err);
         }
       }
       if (viewTree === 'on-failure') {
@@ -238,8 +239,8 @@ export const test = base.extend<MobilewrightTestFixtures>({
             body: Buffer.from(JSON.stringify(tree, null, 2)),
             contentType: 'application/json',
           });
-        } catch {
-          // device may be disconnected
+        } catch (err) {
+          debug('view-tree-on-failure attach failed: %o', err);
         }
       }
     }
