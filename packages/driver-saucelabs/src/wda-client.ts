@@ -206,7 +206,7 @@ export class WdaClient {
   /** Returns the list of apps currently running on the device according to WDA. */
   async listApps(): Promise<AppInfo[]> {
     await this.ensureInitialised();
-    const resp = await this.proxy<WdaAppsListResponse>('GET', '/wda/apps/list', undefined);
+    const resp = await this.proxy<WdaAppsListResponse>('GET', `/session/${this.wdaSessionId}/wda/apps/list`, undefined);
     const apps = resp?.value ?? [];
     return apps.map((a) => ({ bundleId: a.bundleId ?? '', name: a.name }));
   }
