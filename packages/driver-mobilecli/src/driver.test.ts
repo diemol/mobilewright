@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { MobilecliDriver } from './driver.js';
 import { NoDeviceAvailableError, type DeviceInfo } from '@mobilewright/protocol';
 
@@ -502,6 +502,22 @@ test.describe('pointer coordinates are sent to mobilecli as integers', () => {
   });
 });
 
+// The mobilecli server resolves a relative `path` against ITS cwd, which is
+// not the test's cwd when the server was started elsewhere. Always hand it an
+// absolute path.
+test('installApp() sends an absolute path to mobilecli even when given a relative one', async () => {
+  const driver = createDriverWithSession({ platform: 'android', deviceType: 'emulator' });
+  const calls = recordRpc(driver, { 'device.apps.install': {} });
+  const absolutePath = createValidZipFile('relative-install.apk');
+  const relativePath = relative(process.cwd(), absolutePath);
+  expect(relativePath.startsWith('/')).toBe(false);
+
+  await driver.installApp(relativePath);
+
+  expect(calls[0].method).toBe('device.apps.install');
+  expect(calls[0].params.path).toBe(resolve(absolutePath));
+});
+
 // Removing an app that is not there is not an error (real iOS already behaves
 // this way; Android answered `Failure [DELETE_FAILED_INTERNAL_ERROR]`).
 test.describe('uninstallApp() when the app is not installed', () => {
@@ -527,5 +543,5 @@ test.describe('uninstallApp() when the app is not installed', () => {
 
 test('installApp() with a path that does not exist reports the path instead of a raw ENOENT', async () => {
   const driver = createDriverWithSession({ platform: 'android', deviceType: 'emulator' });
-  await expect(driver.installApp('/no/such/dir/app.apk')).rejects.toThrow('App file not found: /no/such/dir/app.apk');
+  await expect(driver.installApp('/no/such/dir/app.apk')).rejects.toThrow(`App file not found: ${resolve('/no/such/dir/app.apk')}`);
 });

@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { writeFileSync, mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   assertValidZipFile,
@@ -12,6 +12,7 @@ import {
   allocationTimeoutFor,
   videoPlan,
   parseViewTreeOption,
+  resolveInstallAppPaths,
 } from './fixture-helpers.js';
 
 function writeTempFile(name: string, bytes: Buffer): string {
@@ -186,5 +187,35 @@ test.describe('parseViewTreeOption', () => {
 
   test('rejects any other value', () => {
     expect(() => parseViewTreeOption('always')).toThrow('Invalid viewTree value: "always"');
+  });
+});
+
+// `installApps` paths are configured relative to the project, but the worker's
+// cwd and the mobilecli server's cwd can both differ from the config directory
+// (e.g. `--config path/to/mobilewright.config.ts`, or a server started from
+// another folder). Resolve them against the config file's directory, as
+// Playwright does for its own path options, so an absolute path reaches the driver.
+test.describe('resolveInstallAppPaths', () => {
+  const configDir = '/projects/shop';
+
+  test('resolves a relative path against the config directory', () => {
+    expect(resolveInstallAppPaths('./builds/app.zip', configDir)).toEqual([resolve('/projects/shop/builds/app.zip')]);
+  });
+
+  test('leaves an absolute path untouched', () => {
+    expect(resolveInstallAppPaths('/tmp/app.apk', configDir)).toEqual([resolve('/tmp/app.apk')]);
+  });
+
+  test('leaves a remote app reference untouched', () => {
+    expect(resolveInstallAppPaths('bs://c700ce60cf13ae8ed97705a55b8e022f', configDir)).toEqual(['bs://c700ce60cf13ae8ed97705a55b8e022f']);
+  });
+
+  test('resolves every entry of an array', () => {
+    expect(resolveInstallAppPaths(['ios/App.zip', '/abs/other.apk'], configDir))
+      .toEqual([resolve('/projects/shop/ios/App.zip'), resolve('/abs/other.apk')]);
+  });
+
+  test('returns an empty list when nothing is configured', () => {
+    expect(resolveInstallAppPaths(undefined, configDir)).toEqual([]);
   });
 });
