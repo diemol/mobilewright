@@ -15,6 +15,10 @@ your tests.
 
 Requires `mobilewright` 0.0.67, Node.js ≥ 22.12, and Android 13 or later on Android devices.
 
+The driver uses the Sauce Labs
+[Real Device Access API](https://docs.saucelabs.com/mobile-apps/real-device-access-api/real-device-access-api-public-and-private-devices/),
+which is available on Enterprise plans only. Self-serve plans don't include it.
+
 ## Setup
 
 ### 1. Install the driver
